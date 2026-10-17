@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>神我狩 チャットパレット変換</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; line-height: 1.6; }
+  h1 { font-size: 1.3rem; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 6px; font-size: 1rem; }
+  textarea { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.9rem; }
+  button { padding: 6px 16px; font-size: 1rem; margin-top: 8px; }
+  #status { margin: 8px 0; white-space: pre-wrap; }
+  #status.error { color: #b00020; }
+  #fallback { border: 1px solid #ccc; padding: 8px 12px; margin: 12px 0; }
+  .note { font-size: 0.85rem; color: #555; }
+</style>
+</head>
+<body>
+<h1>神我狩 キャラシ → チャットパレット変換</h1>
+
+<p>キャラクター保管所のキャラシURLを貼り付けて「変換」を押してください。</p>
+<input type="text" id="url" placeholder="https://charasheet.vampire-blood.net/...">
+<button id="go">変換</button>
+<div id="status"></div>
+
+<details id="fallback">
+  <summary>URLで取得できない場合（非公開のキャラシなど）</summary>
+  <p>1. 次のリンクを開きます（キャラシにログインしている状態で開いてください）：<br>
+     <a id="jslink" href="#" target="_blank" rel="noopener">（URLを入力して変換を押すとここにリンクが出ます）</a></p>
+  <p>2. 表示された文字を全部選択（Ctrl+A）してコピー（Ctrl+C）し、下の欄に貼り付けて「貼り付けから変換」を押します。</p>
+  <textarea id="paste" rows="6" placeholder='{"is_disp_status":"1", ... } をここに貼り付け'></textarea>
+  <button id="go-paste">貼り付けから変換</button>
+</details>
+
+<h2 style="font-size:1.1rem">出力</h2>
+<textarea id="out" rows="24" readonly></textarea>
+<button id="copy">コピー</button>
+<p class="note">ココフォリアの駒の「チャットパレット」欄に貼り付けて使います。ダメージ行の「固定値」「ランク」「出目最大値」は手で書き換えてください。</p>
+
+<script>
+// === convert start ===
+const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+const orDash = (s) => flat(s) || '-';
+const toInt = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : 0; };
+const diceLine = (v, label) => { const n = toInt(v); return `2d6${n < 0 ? '-' : '+'}${Math.abs(n)} ${label}`; };
+const labeled = (label, v) => (flat(v) ? `${label}:${flat(v)}` : null);
+const at = (arr, i) => (Array.isArray(arr) ? arr[i] : '');
+
+function talentLines(d) {
+  const lines = [];
+  (d.skill_name || []).forEach((name, i) => {
+    if (!flat(name)) return;
+    lines.push([
+      flat(name),
+      orDash(at(d.skill_timing, i)),
+      orDash(at(d.skill_range, i)),
+      orDash(at(d.skill_taisho, i)),
+      flat(at(d.skill_cost, i)) || 'なし',
+      orDash(at(d.skill_limit, i)),
+      orDash(at(d.skill_memo, i)),
+    ].join(' / '));
+  });
+  return lines;
+}
+
+function weaponLines(d) {
+  const lines = [];
+  (d.arms_name || []).forEach((name, i) => {
+    if (!flat(name)) return;
+    const parts = [flat(name)];
+    // カテゴリが入っている行だけを武器本体とみなし、数値を出す。
+    // カテゴリなしの行（強化など）は計算上の既定値が入っているため数値を出さない。
+    if (flat(at(d.arms_cate, i))) {
+      parts.push(
+        labeled('距離', at(d.arms_range, i)),
+        labeled('対象', at(d.arms_target, i)),
+        labeled('抵抗', at(d.arms_resist, i)),
+        labeled('命中・発動', at(d.arms_hit, i)),
+        labeled('ダメージ', at(d.arms_damage, i)),
+        labeled('行動', at(d.arms_act, i)),
+      );
+    }
+    parts.push(flat(at(d.arms_memo, i)) || null);
+    lines.push(parts.filter(Boolean).join(' / '));
+  });
+  return lines;
+}
+
+function armorLines(d) {
+  const rows = [
+    ['armor_name', 'armor_kaihi', 'armor_def', 'armor_mdef', 'armor_act', 'armor_memo'],
+    ['acce1_name', 'acce1_kaihi', 'acce1_def', 'acce1_mdef', 'acce1_act', 'acce1_memo'],
+    ['acce2_name', 'acce2_kaihi', 'acce2_def', 'acce2_mdef', 'acce2_act', 'acce2_memo'],
+  ];
+  const lines = [];
+  for (const [n, kaihi, def, mdef, act, memo] of rows) {
+    if (!flat(d[n])) continue;
+    lines.push([
+      flat(d[n]),
+      labeled('回避', d[kaihi]),
+      labeled('装甲', d[def]),
+      labeled('結界', d[mdef]),
+      labeled('行動', d[act]),
+      flat(d[memo]) || null,
+    ].filter(Boolean).join(' / '));
+  }
+  return lines;
+}
+
+function itemLines(d) {
+  const lines = [];
+  (d.item_name || []).forEach((name, i) => {
+    const n = flat(name);
+    if (!n) return;
+    if (n.startsWith('■')) { lines.push(n); return; }
+    lines.push(`${n} ×${toInt(at(d.item_num, i))} / ${orDash(at(d.item_memo, i))}`);
+  });
+  return lines;
+}
+
+function diceLines(d) {
+  const judge = ['体力', '敏捷', '知性', '精神', '幸運'].map((l, i) => diceLine(d[`NB${i + 1}`], l));
+  const battle = ['命中', '回避', '発動', '抵抗', '看破'].map((l, i) => diceLine(d[`NP${i + 1}`], l));
+  return [...judge, ...battle, 'C(固定値+ランク*出目最大値)'];
+}
+
+function convert(d) {
+  const sections = [talentLines(d), weaponLines(d), armorLines(d), itemLines(d), diceLines(d)];
+  return sections.filter((s) => s.length).map((s) => s.join('\n')).join('\n\n') + '\n';
+}
+
+// 生のJSONと、JSONP（callback(...) で包まれた形）の両方を受け付ける
+function parseSheetText(text) {
+  const t = text.trim();
+  if (t.startsWith('{')) return JSON.parse(t);
+  const m = t.match(/^[\w$.]+\s*\(\s*([\s\S]*)\)\s*;?\s*$/);
+  if (m) return JSON.parse(m[1]);
+  throw new Error('JSONとして読めませんでした');
+}
+
+function toJsUrl(input) {
+  const m = String(input).trim().match(/charasheet\.vampire-blood\.net\/(m?[0-9a-f]+)/i);
+  return m ? `https://charasheet.vampire-blood.net/${m[1]}.js` : null;
+}
+// === convert end ===
+
+const cache = new Map();
+
+function jsonp(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const cb = `__kmgkr_cb_${Date.now()}`;
+    const s = document.createElement('script');
+    let done = false;
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      window[cb] = () => {};
+      s.remove();
+      fn(v);
+    };
+    window[cb] = (data) => finish(resolve, data);
+    s.onerror = () => finish(reject, new Error('読み込みに失敗しました'));
+    // JSONPに対応していない場合、読み込みは成功してもコールバックが呼ばれない
+    s.onload = () => setTimeout(() => finish(reject, new Error('データを受け取れませんでした')), 0);
+    const timer = setTimeout(() => finish(reject, new Error('時間切れです')), timeoutMs);
+    s.src = `${url}?callback=${cb}`;
+    document.head.appendChild(s);
+  });
+}
+
+const $ = (id) => document.getElementById(id);
+function setStatus(msg, isError = false) {
+  $('status').textContent = msg;
+  $('status').className = isError ? 'error' : '';
+}
+function show(d) {
+  if (d.game && d.game !== 'kmgkr') {
+    setStatus(`神我狩以外のキャラシのようです（game: ${d.game}）。出力は正しくない可能性があります。`, true);
+  } else {
+    setStatus(`変換しました：${flat(d.pc_name) || '（名前なし）'}`);
+  }
+  $('out').value = convert(d);
+}
+
+$('go').addEventListener('click', async () => {
+  const jsUrl = toJsUrl($('url').value);
+  if (!jsUrl) { setStatus('キャラクター保管所のURLを入力してください。', true); return; }
+  $('jslink').href = jsUrl;
+  $('jslink').textContent = jsUrl;
+  if (cache.has(jsUrl)) { show(cache.get(jsUrl)); return; }
+  $('go').disabled = true;
+  setStatus('取得中…');
+  try {
+    const d = await jsonp(jsUrl);
+    cache.set(jsUrl, d);
+    show(d);
+  } catch (e) {
+    setStatus(`URLから取得できませんでした（${e.message}）。\n下の「URLで取得できない場合」の手順で貼り付けてください。`, true);
+    $('fallback').open = true;
+  } finally {
+    $('go').disabled = false;
+  }
+});
+
+$('go-paste').addEventListener('click', () => {
+  try {
+    show(parseSheetText($('paste').value));
+  } catch (e) {
+    setStatus(`貼り付けた内容を読めませんでした（${e.message}）。全部選択してコピーしたか確認してください。`, true);
+  }
+});
+
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('out').value);
+    setStatus('コピーしました。');
+  } catch {
+    $('out').select();
+    setStatus('自動コピーできませんでした。選択状態にしたので Ctrl+C でコピーしてください。', true);
+  }
+});
+</script>
+</body>
+</html>
